@@ -28,7 +28,7 @@ class WorldModel(object):
             "verbose": True,
         },
         normalize_reps=True,
-        device="cuda:0",
+        device="cuda:0", #only used in encode, which is not used anywhere
     ):
         super().__init__()
         self.encoder = encoder
@@ -39,6 +39,7 @@ class WorldModel(object):
         self.device = device
         self.mpc_args = mpc_args
 
+    #doesn't seem to be used anywhere
     def encode(self, image):
         clip = np.expand_dims(image, axis=0)
         clip = self.transform(clip)[None, :]

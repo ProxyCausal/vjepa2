@@ -151,6 +151,8 @@ def cem(
 
         logger.info(f"new mean: {mean.sum(dim=0)} {std.sum(dim=0)}")
 
+        del action_traj, frame_traj #free memory
+
     new_action = torch.cat(
         [
             mean[..., :3],
