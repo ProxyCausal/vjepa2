@@ -164,6 +164,113 @@ def cem(
 
     return new_action
 
+def cem_gripper_only(
+    context_frame,
+    context_pose,
+    goal_frame,
+    world_model,
+    rollout=1,
+    cem_steps=100,
+    momentum_mean_gripper=0.15,
+    momentum_std_gripper=0.15,
+    samples=100,
+    topk=10,
+    verbose=False,
+    maxnorm=0.05,
+    axis={},
+    objective=l1,
+    close_gripper=None,
+):
+    """
+    :param context_frame: [B=1, T=1, HW, D]
+    :param goal_frame: [B=1, T=1, HW, D]
+    :param world_model: f(context_frame, action) -> next_frame [B, 1, HW, D]
+    :return: [B=1, rollout, 7] an action trajectory over rollout horizon
+
+    Cross-Entropy Method
+    -----------------------
+    1. for rollout horizon:
+    1.1. sample several actions
+    1.2. compute next states using WM
+    3. compute similarity of final states to goal_frames
+    4. select topk samples and update mean and std using topk action trajs
+    5. choose final action to be mean of distribution
+    """
+    context_frame = context_frame.repeat(samples, 1, 1, 1)  # Reshape to [S, 1, HW, D]
+    goal_frame = goal_frame.repeat(samples, 1, 1, 1)  # Reshape to [S, 1, HW, D]
+    context_pose = context_pose.repeat(samples, 1, 1)  # Reshape to [S, 1, 7]
+
+    # Current estimate of the mean/std of distribution over gripper actions only
+    mean = torch.zeros((rollout, 1), device=context_frame.device)
+    std = torch.ones((rollout, 1), device=context_frame.device)
+
+    def sample_action_traj():
+        """Sample several action trajectories"""
+        action_traj, frame_traj, pose_traj = None, context_frame, context_pose
+
+        for h in range(rollout):
+
+            # -- sample gripper action only (xyz and rotation fixed at zero)
+            gripper_samples = torch.randn(samples, 1, device=mean.device) * std[h] + mean[h]
+            gripper_samples = torch.clip(gripper_samples, min=-0.75, max=0.75)
+            action_samples = torch.cat(
+                [
+                    torch.zeros((len(gripper_samples), 6), device=mean.device),
+                    gripper_samples,
+                ],
+                dim=-1,
+            )[:, None]
+            if close_gripper is not None and h >= close_gripper:
+                action_samples[:, :, -1] = 1.0
+
+            action_traj = (
+                torch.cat([action_traj, action_samples], dim=1) if action_traj is not None else action_samples
+            )
+
+            # -- compute next state
+            next_frame, next_pose = world_model(frame_traj, action_traj, pose_traj)
+            frame_traj = torch.cat([frame_traj, next_frame], dim=1)
+            pose_traj = torch.cat([pose_traj, next_pose], dim=1)
+
+        return action_traj, frame_traj
+
+    def select_topk_action_traj(final_state, goal_state, actions):
+        """Get the topk action trajectories that bring us closest to goal"""
+        sims = objective(final_state.flatten(1), goal_state.flatten(1))
+        indices = sims.topk(topk, largest=False).indices
+        selected_actions = actions[indices]
+        return selected_actions
+
+    for step in tqdm(range(cem_steps), disable=True):
+        action_traj, frame_traj = sample_action_traj()
+        selected_actions = select_topk_action_traj(
+            final_state=frame_traj[:, -1], goal_state=goal_frame, actions=action_traj
+        )
+
+        # -- Update new sampling mean and std based on the top-k gripper samples
+        gripper_actions = selected_actions[..., -1:]
+        mean = (
+            gripper_actions.mean(dim=0) * (1.0 - momentum_mean_gripper)
+            + mean * momentum_mean_gripper
+        )
+        std = (
+            gripper_actions.std(dim=0) * (1.0 - momentum_std_gripper)
+            + std * momentum_std_gripper
+        )
+
+        logger.info(f"new mean: {mean.sum(dim=0)} {std.sum(dim=0)}")
+
+        del action_traj, frame_traj #free memory
+
+    new_action = torch.cat(
+        [
+            torch.zeros((rollout, 6), device=mean.device),
+            mean #round_small_elements(mean, 0.25),
+        ],
+        dim=-1,
+    )[None, :]
+
+    return new_action
 
 def compute_new_pose(pose, action):
     """

@@ -6,7 +6,7 @@
 import numpy as np
 import torch.nn.functional as F
 
-from .mpc_utils import cem, compute_new_pose
+from .mpc_utils import cem, cem_gripper_only, compute_new_pose
 
 
 class WorldModel(object):
@@ -52,7 +52,7 @@ class WorldModel(object):
             h = F.layer_norm(h, (h.size(-1),))
         return h
 
-    def infer_next_action(self, rep, pose, goal_rep, close_gripper=None):
+    def infer_next_action(self, rep, pose, goal_rep, close_gripper=None, gripper_only=False):
 
         def step_predictor(reps, actions, poses):
             B, T, N_T, D = reps.size()
@@ -64,13 +64,23 @@ class WorldModel(object):
             next_pose = compute_new_pose(poses[:, -1:], actions[:, -1:])
             return next_rep, next_pose
 
-        mpc_action = cem(
-            context_frame=rep,
-            context_pose=pose,
-            goal_frame=goal_rep,
-            world_model=step_predictor,
-            close_gripper=close_gripper,
-            **self.mpc_args,
-        )[0]
+        if gripper_only:
+            mpc_action = cem_gripper_only(
+                context_frame=rep,
+                context_pose=pose,
+                goal_frame=goal_rep,
+                world_model=step_predictor,
+                close_gripper=close_gripper,
+                **self.mpc_args,
+            )[0]
+        else:
+            mpc_action = cem(
+                context_frame=rep,
+                context_pose=pose,
+                goal_frame=goal_rep,
+                world_model=step_predictor,
+                close_gripper=close_gripper,
+                **self.mpc_args,
+            )[0]
 
         return mpc_action
