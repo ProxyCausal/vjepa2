@@ -157,10 +157,12 @@ def cem(
         [
             mean[..., :3],
             torch.zeros((rollout, 3), device=mean.device),
-            round_small_elements(mean[..., -1:], 0.25),
+            mean[..., -1:], #round_small_elements(mean[..., -1:], 0.25)
         ],
         dim=-1,
     )[None, :]
+
+    logger.info(f"final mean: {mean}")
 
     return new_action
 
@@ -269,6 +271,8 @@ def cem_gripper_only(
         ],
         dim=-1,
     )[None, :]
+
+    logger.info(f"final mean: {mean}")
 
     return new_action
 
