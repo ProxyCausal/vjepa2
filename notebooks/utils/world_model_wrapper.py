@@ -6,6 +6,7 @@
 import numpy as np
 import torch.nn.functional as F
 
+from . import mpc_utils
 from .mpc_utils import cem, cem_gripper_only, compute_new_pose
 
 
@@ -26,6 +27,8 @@ class WorldModel(object):
             "momentum_std": 0.15,
             "maxnorm": 0.05,
             "verbose": True,
+            "max_gd_steps": 500,
+            "lr": 0.05,
         },
         normalize_reps=True,
         device="cuda:0", #only used in encode, which is not used anywhere
@@ -38,6 +41,10 @@ class WorldModel(object):
         self.tokens_per_frame = tokens_per_frame
         self.device = device
         self.mpc_args = mpc_args
+
+        self.predictor.eval()
+        for p in self.predictor.parameters():
+            p.requires_grad = False
 
     #doesn't seem to be used anywhere
     def encode(self, image):
@@ -52,7 +59,7 @@ class WorldModel(object):
             h = F.layer_norm(h, (h.size(-1),))
         return h
 
-    def infer_next_action(self, rep, pose, goal_rep, close_gripper=None, gripper_only=False):
+    def infer_next_action(self, rep, pose, goal_rep, close_gripper=None, method='cem'):
 
         def step_predictor(reps, actions, poses):
             B, T, N_T, D = reps.size()
@@ -61,10 +68,10 @@ class WorldModel(object):
             if self.normalize_reps:
                 next_rep = F.layer_norm(next_rep, (next_rep.size(-1),))
             next_rep = next_rep.view(B, 1, N_T, D)
-            next_pose = compute_new_pose(poses[:, -1:], actions[:, -1:])
+            next_pose = compute_new_pose(poses[:, -1:], actions[:, -1:].detach())
             return next_rep, next_pose
 
-        if gripper_only:
+        if method == 'cem_gripper_only':
             mpc_action = cem_gripper_only(
                 context_frame=rep,
                 context_pose=pose,
@@ -73,7 +80,7 @@ class WorldModel(object):
                 close_gripper=close_gripper,
                 **self.mpc_args,
             )[0]
-        else:
+        elif method == 'cem':
             mpc_action = cem(
                 context_frame=rep,
                 context_pose=pose,
@@ -82,5 +89,13 @@ class WorldModel(object):
                 close_gripper=close_gripper,
                 **self.mpc_args,
             )[0]
+        elif method == 'gd':
+            mpc_action = mpc_utils.gd(
+                context_frame=rep,
+                context_pose=pose,
+                goal_frame=goal_rep,
+                world_model=step_predictor,
+                **self.mpc_args,
+            )[0]            
 
         return mpc_action

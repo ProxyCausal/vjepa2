@@ -24,6 +24,72 @@ def round_small_elements(tensor, threshold):
     new_tensor[mask] = 0
     return new_tensor
 
+def gd(
+    context_frame,   # [1, 1, HW, D]
+    context_pose,    # [1, 1, 7]
+    goal_frame,      # [1, 1, HW, D]
+    world_model,     # same step_predictor closure
+    rollout=1,
+    max_gd_steps=500,
+    lr=0.05,
+    maxnorm=0.05,
+    objective=l1
+):
+    if rollout > 1:
+        raise("Rollout>1 not implemented")
+
+    context_frame = context_frame.repeat(1, 1, 1, 1)  # Reshape to [S, 1, HW, D]
+    goal_frame = goal_frame.repeat(1, 1, 1, 1)  # Reshape to [S, 1, HW, D]
+    context_pose = context_pose.repeat(1, 1, 1)  # Reshape to [S, 1, 7]
+
+    #test out compare losses to known opt
+    """
+    action = torch.tensor([0,0,0,0,0,0,0.2]).view(1,1,-1)
+    next_frame, next_pose = world_model(
+        context_frame, action, context_pose
+    )
+    loss = objective(next_frame.flatten(1), goal_frame.flatten(1)).mean()
+    print("Ground truth loss: {}".format(loss.item()))
+    """
+    
+    action_opt = torch.zeros(1, 4, device=context_frame.device, requires_grad=True)
+    opt = torch.optim.Adam([action_opt], lr=lr)
+    loss_best = np.inf
+    for i in range(max_gd_steps):
+        opt.zero_grad()
+        # Build full action (zero rotation; clip / clamp free dims)
+        action = torch.cat([
+            action_opt[:,:3],
+            torch.zeros(1, 3, device=action_opt.device),
+            action_opt[:,3:4]
+        ], dim=-1)[:, None] # [1, 1, 7]
+
+        #print(action.shape)
+        
+        # Rollout through frozen WM (grads flow into a only) 
+        next_frame, next_pose = world_model(
+            context_frame, action, context_pose
+        )
+
+        loss = objective(next_frame.flatten(1), goal_frame.flatten(1)).mean()
+        loss.backward()
+        opt.step()
+
+        if loss.item() < loss_best:
+            loss_best = loss.item()
+            action_best = action.clone().detach()
+
+        #if i % 10 == 0:
+        print("iter {}: {}".format(i, loss.item()))
+
+        #don't include in gradients, clamp after opt
+        with torch.no_grad():
+            action[..., :3].clamp_(-maxnorm, maxnorm)
+            action[..., -1:].clamp_(-0.75, 0.75)
+
+    print("Best action: {} with a loss of {}".format(action_best, loss_best))
+
+    return action_best
 
 def cem(
     context_frame,
@@ -164,7 +230,7 @@ def cem(
 
     logger.info(f"final mean: {mean}")
 
-    return new_action
+    return new_action #action_traj if want to return sampled pop
 
 def cem_gripper_only(
     context_frame,
